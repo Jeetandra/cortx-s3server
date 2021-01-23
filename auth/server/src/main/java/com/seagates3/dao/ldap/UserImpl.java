@@ -32,6 +32,7 @@ import com.novell.ldap.LDAPEntry;
 import com.novell.ldap.LDAPException;
 import com.novell.ldap.LDAPModification;
 import com.novell.ldap.LDAPSearchResults;
+import com.seagates3.authserver.AuthServerConfig;
 import com.seagates3.dao.UserDAO;
 import com.seagates3.exception.DataAccessException;
 import com.seagates3.model.User;
@@ -88,7 +89,7 @@ public class UserImpl implements UserDAO {
           throw new DataAccessException("Failed to find user details.\n" + ex);
         }
 
-        if (ldapResults.hasMore()) {
+        if (ldapResults != null && ldapResults.hasMore()) {
             LDAPEntry entry;
 
             try {
@@ -191,7 +192,7 @@ public class UserImpl implements UserDAO {
             throw new DataAccessException("Failed to find user details.\n" + e);
         }
 
-        if (ldapResult.hasMore()) {
+        if (ldapResult != null && ldapResult.hasMore()) {
           LDAPEntry ldapEntry;
             try {
               ldapEntry = ldapResult.next();
@@ -264,21 +265,19 @@ public class UserImpl implements UserDAO {
             throw new DataAccessException("Failed to find all user details.\n" +
                                           ex);
         }
-        int ldapResultCount = 0;
+        if (ldapResults != null) {
+          int maxLdapResults = AuthServerConfig.getLdapSearchResultsSizeLimit();
+          int resultCount = 0;
         while (ldapResults.hasMore()) {
             user = new User();
             LDAPEntry entry;
             try {
               // Prevent client failure for fetching more than 500 entries
-              if (ldapResultCount < 500) {
-                entry = ldapResults.next();
-              } else {
-                LOGGER.info("Considering only 500 user records and ignoring " +
-                            "remaining records");
-                break;
-              }
+              entry = ldapResults.next();
             } catch (LDAPException ex) {
-                throw new DataAccessException("Ldap failure.\n" + ex);
+              LOGGER.error("Failed get ldap results." + " Message: " +
+                           ex.getMessage() + " Cause: " + ex.getCause());
+              throw new DataAccessException("Ldap failure.\n" + ex);
             }
             user.setId(entry.getAttribute(LDAPUtils.USER_ID).getStringValue());
             user.setName(
@@ -293,9 +292,13 @@ public class UserImpl implements UserDAO {
             user.setCreateDate(createTime);
             user.setArn(entry.getAttribute(LDAPUtils.ARN).getStringValue());
             users.add(user);
-            ldapResultCount++;
+            ++resultCount;
+            if (resultCount >= maxLdapResults) {
+              LOGGER.info("Fetched max records of accounts " + maxLdapResults);
+              break;
+            }
         }
-
+        }
         User[] userList = new User[users.size()];
         return (User[]) users.toArray(userList);
     }
@@ -440,7 +443,7 @@ public class UserImpl implements UserDAO {
           LOGGER.error("Failed to find details of user: " + userId);
           throw new DataAccessException("Failed to find user details.\n" + ex);
         }
-        if (ldapResults.hasMore()) {
+        if (ldapResults != null && ldapResults.hasMore()) {
           LDAPEntry entry;
           try {
             entry = ldapResults.next();
@@ -497,7 +500,7 @@ public class UserImpl implements UserDAO {
         LOGGER.error("Failed to find details of user: " + arnToFind);
         throw new DataAccessException("Failed to find user details.\n" + ex);
         }
-        if (ldapResults.hasMore()) {
+        if (ldapResults != null && ldapResults.hasMore()) {
           LOGGER.info("inside search loop");
           LDAPEntry entry;
           try {

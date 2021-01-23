@@ -26,6 +26,7 @@
 #include <openssl/md5.h>
 #include <event2/thread.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include "motr_helpers.h"
 #include "evhtp_wrapper.h"
@@ -89,6 +90,8 @@ struct m0_uint128 global_instance_list_index;
 struct m0_uint128 global_probable_dead_object_list_index_oid;
 
 int global_shutdown_in_progress;
+pthread_t global_tid_indexop;
+pthread_t global_tid_objop;
 
 struct m0_uint128 global_instance_id;
 int shutdown_motr_teardown_called;
@@ -98,7 +101,7 @@ std::set<struct s3_motr_idx_context *> global_motr_idx;
 std::set<struct s3_motr_obj_context *> global_motr_obj;
 
 void s3_motr_init_timeout_cb(evutil_socket_t fd, short event, void *arg) {
-  s3_log(S3_LOG_ERROR, "", "Entering\n");
+  s3_log(S3_LOG_ERROR, "", "%s Entry\n", __func__);
   s3_iem(LOG_ALERT, S3_IEM_MOTR_CONN_FAIL, S3_IEM_MOTR_CONN_FAIL_STR,
          S3_IEM_MOTR_CONN_FAIL_JSON);
   event_base_loopbreak(global_evbase_handle);
@@ -129,39 +132,27 @@ static void on_client_request_error(evhtp_request_t *p_evhtp_req,
   }
 }
 
-static void s3_kickoff_graceful_shutdown(int ignore) {
-  if (!global_shutdown_in_progress) {
-    global_shutdown_in_progress = 1;
-    // signal handler
-    S3Option *option_instance = S3Option::get_instance();
-    int grace_period_sec = option_instance->get_s3_grace_period_sec();
-    struct timeval loopexit_timeout = {.tv_sec = 0, .tv_usec = 0};
-
-    // trigger rollbacks & stop handling new requests
-    option_instance->set_is_s3_shutting_down(true);
-
-    if (grace_period_sec > 6) {
-      loopexit_timeout.tv_sec = grace_period_sec - 6;
-    }
-    // event_base_loopexit() will let event loop serve all events as usual
-    // till loopexit_timeout (1 sec). After the timeout, all active events will
-    // be served and then the event loop breaks.
-    s3_log(S3_LOG_INFO, "", "Calling event_base_loopexit\n");
-    event_base_loopexit(global_evbase_handle, &loopexit_timeout);
-  }
-  return;
-}
-
 //
 // As per document http://www.wangafu.net/~nickm/libevent-book/Ref4_event.html
 // Its safe to call all functions from the callback as
 // libevent run in the event loop after the signal occurs
 //
 static void s3_signal_cb(evutil_socket_t sig, short events, void *user_data) {
-  s3_log(S3_LOG_INFO, "", "Entering\n");
+  s3_log(S3_LOG_INFO, "", "%s Entry\n", __func__);
   s3_log(S3_LOG_INFO, "", "About to trigger shutdown\n");
   s3_kickoff_graceful_shutdown(1);
-  s3_log(S3_LOG_DEBUG, "", "Exiting\n");
+  s3_log(S3_LOG_DEBUG, "", "%s Exit", __func__);
+  return;
+}
+
+static void s3_hup_signal_cb(evutil_socket_t sig, short events,
+                             void *user_data) {
+  bool ret;
+  s3_log(S3_LOG_INFO, "", "Entering\n");
+  ret = parse_and_reload_config_options();
+  if (!ret) {
+    s3_log(S3_LOG_ERROR, "", "Failed to parse and reload config file\n");
+  }
   return;
 }
 
@@ -193,8 +184,7 @@ static evhtp_res on_client_request_fini(evhtp_request_t *p_evhtp_req,
 
 extern "C" evhtp_res dispatch_s3_api_request(evhtp_request_t *req,
                                              evhtp_headers_t *hdrs, void *arg) {
-  s3_log(S3_LOG_INFO, "", "Received Request with uri [%s].\n",
-         req->uri->path->full);
+  s3_log(S3_LOG_INFO, "", "Req uri [%s]\n", req->uri->path->full);
 
   if (req->uri->query_raw) {
     s3_log(S3_LOG_DEBUG, "", "Received Request with query params [%s].\n",
@@ -323,8 +313,7 @@ extern "C" evhtp_res dispatch_s3_api_request(evhtp_request_t *req,
 extern "C" evhtp_res dispatch_motr_api_request(evhtp_request_t *req,
                                                evhtp_headers_t *hdrs,
                                                void *arg) {
-  s3_log(S3_LOG_INFO, "", "Received Request with uri [%s].\n",
-         req->uri->path->full);
+  s3_log(S3_LOG_INFO, "", "Request uri [%s]\n", req->uri->path->full);
 
   if (req->uri->query_raw) {
     s3_log(S3_LOG_DEBUG, "", "Received Request with query params [%s].\n",
@@ -551,89 +540,67 @@ void fini_auth_ssl() {
 // This index will be holding the ids for the bucket
 int create_global_index(struct m0_uint128 &root_index_oid,
                         const uint64_t &u_lo_index_offset) {
-  int rc;
-  struct m0_op *ops[1] = {NULL};
-  struct m0_op *sync_op = NULL;
-  struct m0_idx idx;
-  unsigned short motr_op_wait_period =
-      g_option_instance->get_motr_op_wait_period();
+  int rc = 0;
 
-  memset(&idx, 0, sizeof(idx));
-  ops[0] = NULL;
+  const auto motr_op_wait_period = g_option_instance->get_motr_op_wait_period();
+  unsigned n_retry = g_option_instance->get_max_retry_count() + 1;
+
   // reserving an oid for root index -- M0_ID_APP + offset
+  const auto m0_timeout = m0_time_from_now(motr_op_wait_period, 0);
   init_s3_index_oid(root_index_oid, u_lo_index_offset);
+
+  struct m0_idx idx;
+  memset(&idx, 0, sizeof idx);
+
   m0_idx_init(&idx, &motr_uber_realm, &root_index_oid);
-  m0_entity_create(NULL, &idx.in_entity, &ops[0]);
-  m0_op_launch(ops, 1);
 
-  rc = m0_op_wait(ops[0], M0_BITS(M0_OS_FAILED, M0_OS_STABLE),
-                  m0_time_from_now(motr_op_wait_period, 0));
-  rc = (rc < 0) ? rc : m0_rc(ops[0]);
-  if (rc < 0) {
-    if (rc != -EEXIST) {
-      goto FAIL;
+  for (; --n_retry > 0; ::sleep(1)) {  // suspend current thread for 1 second
+    struct m0_op *cr_op = nullptr;
+
+    m0_entity_create(NULL, &idx.in_entity, &cr_op);
+    m0_op_launch(&cr_op, 1);
+
+    rc = m0_op_wait(cr_op, M0_BITS(M0_OS_FAILED, M0_OS_STABLE), m0_timeout);
+    if (rc >= 0) {
+      rc = m0_rc(cr_op);
     }
-  }
-  if (rc != -EEXIST) {
+    teardown_motr_cancel_wait_op(cr_op, m0_timeout);
+
+    if (-EEXIST == rc) {
+      rc = 0;
+      break;
+    }
+    if (-ETIMEDOUT == rc) {
+      continue;
+    }
+    if (rc) {
+      break;
+    }
+    struct m0_op *sync_op = nullptr;
+
     rc = m0_sync_op_init(&sync_op);
-    if (rc != 0) {
-      goto FAIL;
+    if (rc) {
+      break;
     }
-
     rc = m0_sync_entity_add(sync_op, &idx.in_entity);
-    if (rc != 0) {
-      goto FAIL;
-    }
-    m0_op_launch(&sync_op, 1);
-    rc = m0_op_wait(sync_op, M0_BITS(M0_OS_FAILED, M0_OS_STABLE),
-                    m0_time_from_now(motr_op_wait_period, 0));
-    if (rc < 0) {
-      goto FAIL;
-    }
-  }
-  if (ops[0] != NULL) {
-    teardown_motr_op(ops[0]);
-  }
-  if (sync_op != NULL) {
-    teardown_motr_op(sync_op);
-  }
 
-  if (idx.in_entity.en_sm.sm_state != 0) {
+    if (!rc) {
+      m0_op_launch(&sync_op, 1);
+      rc = m0_op_wait(sync_op, M0_BITS(M0_OS_FAILED, M0_OS_STABLE), m0_timeout);
+    }
+    teardown_motr_cancel_wait_op(sync_op, m0_timeout);
+
+    if (rc != -ETIMEDOUT) {
+      break;
+    }
+  }
+  if (idx.in_entity.en_sm.sm_state) {
     m0_idx_fini(&idx);
   }
-
-  return 0;
-
-FAIL:
-  if (ops[0] != NULL) {
-    if (ops[0]->op_sm.sm_state == M0_OS_LAUNCHED) {
-      m0_op_cancel(&ops[0], 1);
-      // crash was observed when m0_op_wait is not called
-      m0_op_wait(ops[0], M0_BITS(M0_OS_FAILED, M0_OS_STABLE),
-                 m0_time_from_now(motr_op_wait_period, 0));
-    } else if (ops[0]->op_sm.sm_state == M0_OS_INITIALISED ||
-               ops[0]->op_sm.sm_state == M0_OS_STABLE ||
-               ops[0]->op_sm.sm_state == M0_OS_FAILED) {
-      m0_op_fini(ops[0]);
-    } else if (ops[0]->op_sm.sm_state == M0_OS_UNINITIALISED) {
-      m0_op_free(ops[0]);
-    }
+  if (rc) {
+    s3_iem(LOG_ALERT, S3_IEM_MOTR_CONN_FAIL, S3_IEM_MOTR_CONN_FAIL_STR,
+           S3_IEM_MOTR_CONN_FAIL_JSON);
   }
-  if (sync_op != NULL) {
-    if (sync_op->op_sm.sm_state == M0_OS_LAUNCHED) {
-      m0_op_cancel(&sync_op, 1);
-      m0_op_wait(sync_op, M0_BITS(M0_OS_FAILED, M0_OS_STABLE),
-                 m0_time_from_now(motr_op_wait_period, 0));
-    } else if (sync_op->op_sm.sm_state == M0_OS_INITIALISED ||
-               sync_op->op_sm.sm_state == M0_OS_STABLE ||
-               sync_op->op_sm.sm_state == M0_OS_FAILED) {
-      m0_op_fini(sync_op);
-    } else if (sync_op->op_sm.sm_state == M0_OS_UNINITIALISED) {
-      m0_op_free(sync_op);
-    }
-  }
-  s3_iem(LOG_ALERT, S3_IEM_MOTR_CONN_FAIL, S3_IEM_MOTR_CONN_FAIL_STR,
-         S3_IEM_MOTR_CONN_FAIL_JSON);
   return rc;
 }
 
@@ -733,6 +700,7 @@ int main(int argc, char **argv) {
   pthread_t tid;
   struct event *signal_sigint_event;
   struct event *signal_sigterm_event;
+  struct event *signal_sighup_event;
   // map will have s3server { fid, instance_id } information
   std::map<std::string, std::string> s3server_instance_id;
 
@@ -772,8 +740,9 @@ int main(int argc, char **argv) {
   S3Daemonize s3daemon;
   set_fatal_handler_exit();
   s3daemon.daemonize();
+#if 0
   s3daemon.register_signals();
-
+#endif
   // dump the config
   g_option_instance->dump_options();
 
@@ -1191,6 +1160,13 @@ int main(int argc, char **argv) {
     s3_log(S3_LOG_FATAL, "", "Could not create/add a signal SIGTERM event!\n");
   }
 
+  signal_sighup_event =
+      evsignal_new(global_evbase_handle, SIGHUP, s3_hup_signal_cb,
+                   (void *)global_evbase_handle);
+  if (!signal_sighup_event || event_add(signal_sighup_event, NULL) < 0) {
+    s3_log(S3_LOG_FATAL, "", "Could not create/add a signal SIGHUP event!\n");
+  }
+
   /* Set the fatal handler to graceful shutdown*/
   set_graceful_handler();
 
@@ -1209,11 +1185,10 @@ int main(int argc, char **argv) {
 
   shutdown_motr_teardown_called = 1;
   global_motr_teardown();
-
   s3_perf_metrics_fini();
-
+  pthread_join(global_tid_indexop, NULL);
+  pthread_join(global_tid_objop, NULL);
   S3FakeMotrRedisKvs::destroy_instance();
-
   free_evhtp_handle(htp_ipv4);
   free_evhtp_handle(htp_ipv6);
   free_evhtp_handle(htp_motr);
@@ -1231,13 +1206,11 @@ int main(int argc, char **argv) {
   s3_stats_fini();
   S3AuditInfoLogger::finalize();
   finalize_cli_options();
-
   S3MempoolManager::destroy_instance();
   S3MotrLayoutMap::destroy_instance();
   S3Option::destroy_instance();
-  fini_log();
-
   event_destroy_mempool();
+  fini_log();
   event_free(signal_sigint_event);
   event_free(signal_sigterm_event);
   event_base_free(global_evbase_handle);
@@ -1245,6 +1218,5 @@ int main(int argc, char **argv) {
   // so that leak-check tools dont complain
   // Added in libevent 2.1
   libevent_global_shutdown();
-
   return 0;
 }

@@ -81,6 +81,7 @@ TEST_F(S3OptionsTest, Constructor) {
   EXPECT_EQ(9125, instance->get_statsd_port());
   EXPECT_EQ(15, instance->get_statsd_max_send_retry());
   EXPECT_EQ(5, instance->get_client_req_read_timeout_secs());
+  EXPECT_TRUE(instance->is_s3server_addb_dump_enabled());
 }
 
 TEST_F(S3OptionsTest, SingletonCheck) {
@@ -123,6 +124,7 @@ TEST_F(S3OptionsTest, GetOptionsfromFile) {
   EXPECT_EQ(9125, instance->get_statsd_port());
   EXPECT_EQ(15, instance->get_statsd_max_send_retry());
   EXPECT_EQ(5, instance->get_client_req_read_timeout_secs());
+  EXPECT_TRUE(instance->is_s3server_addb_dump_enabled());
   EXPECT_EQ("s3stats-allowlist-test.yaml",
             instance->get_stats_allowlist_filename());
 }
@@ -243,6 +245,7 @@ TEST_F(S3OptionsTest, LoadS3SectionFromFile) {
   EXPECT_EQ(15, instance->get_statsd_max_send_retry());
   EXPECT_EQ("s3stats-allowlist-test.yaml",
             instance->get_stats_allowlist_filename());
+  EXPECT_TRUE(instance->is_s3server_addb_dump_enabled());
 
   // These will come with default values.
   EXPECT_EQ(std::string("localhost@tcp:12345:33:100"),
@@ -284,6 +287,7 @@ TEST_F(S3OptionsTest, LoadSelectiveS3SectionFromFile) {
   EXPECT_EQ(15, instance->get_statsd_max_send_retry());
   EXPECT_EQ("s3stats-allowlist-test.yaml",
             instance->get_stats_allowlist_filename());
+  EXPECT_TRUE(instance->is_s3server_addb_dump_enabled());
 
   // These should be default values
   EXPECT_EQ(std::string("localhost@tcp:12345:33:100"),
@@ -486,5 +490,25 @@ TEST_F(S3OptionsTest, MissingOptions) {
   EXPECT_FALSE(instance->load_all_sections(true));
 
   // delete the file
+  unlink(config_file.c_str());
+}
+
+TEST_F(S3OptionsTest, TestReloadOptionsfromFile) {
+  // create a temporary yaml file
+  std::ofstream cfg_file;
+  std::string config_file("s3config-temp-test.yaml");
+  cfg_file.open(config_file);
+  cfg_file << "S3Config_Sections: [S3_SERVER_CONFIG, S3_AUTH_CONFIG, "
+              "S3_MOTR_CONFIG]\n";
+  cfg_file << "S3_SERVER_CONFIG:\n";
+  cfg_file << "   S3_LOG_MODE: ERROR\n";
+  cfg_file << "S3_AUTH_CONFIG:\n";
+  cfg_file << "   S3_AUTH_PORT: 8095\n";
+  cfg_file << "S3_MOTR_CONFIG:\n";
+  cfg_file << "   S3_MOTR_MAX_BLOCKS_PER_REQUEST: 1\n";
+  cfg_file.close();
+  instance->set_option_file(config_file);
+  EXPECT_TRUE(instance->reload_modifiable_options());
+  EXPECT_EQ(std::string("ERROR"), instance->get_log_level());
   unlink(config_file.c_str());
 }

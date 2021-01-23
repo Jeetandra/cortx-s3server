@@ -1,5 +1,5 @@
 # CORTX-S3 Server Quick Start Guide
-This guide provides a step-by-step walkthrough for getting you CORTX-S3 Server-ready.
+This guide provides a step-by-step walkthrough for getting you CORTX-S3 Server ready.
 
 - [1.0 Prerequisites](#10-Prerequisites)
 - [1.1 Clone the CORTX-S3 Server Repository](#11-Clone-the-CORTX-S3-Server-Repository)
@@ -9,13 +9,17 @@ This guide provides a step-by-step walkthrough for getting you CORTX-S3 Server-r
 - [1.5 Test a specific MOTR Version using CORX-S3 Server](#15-Test-a-Specific-MOTR-Version-using-CORX-S3-Server)
 - [1.6 Build S3 RPMs](#16-Build-S3-RPMs)
 
+:warning: **Notes:** 
+- The following steps will not work if you have previously installed the COTX software using an OVA or RPMs.
+    - To install and test the S3 submodule, you'll have to create a new VM. 
+
 ### 1.0 Prerequisites
 
 <details>
 <summary>Click to expand!</summary>
 <p>
 
-1. You'll need to set up SSC, Cloud VM, or a local VM on VMWare Fusion or Oracle VirtualBox. To know more, refer to the [LocalVMSetup](https://github.com/Seagate/cortx/blob/main/doc/LocalVMSetup.md) section.
+1. You'll need to set up SSC, Cloud VM, or a local VM on VMWare Fusion or Oracle VirtualBox.
 2. As a CORTX contributor you will need to refer, clone, contribute, and commit changes via the GitHub server. You can access the latest code via [Github](https://github.com/Seagate/cortx).
 3. You'll need a valid GitHub Account.
 4. Before you clone your Git repository, you'll need to create the following:
@@ -45,9 +49,13 @@ This guide provides a step-by-step walkthrough for getting you CORTX-S3 Server-r
             * If epel was installed, you'll see it in the output list.
             * You might also see exclamation mark in front of the repositories id. Refer to the [Redhat Knowledge Base](https://access.redhat.com/solutions/2267871).
         * `$ yum install -y epel-release`
-    * Verify if kernel-devel-3.10.0-1062 version package is installed, using: `$ uname -r`
+    * Verify if kernel version is 3.10.0-1062 (for centos-7.7) or 3.10.0-1127 (for centos-7.8), using: `$ uname -r`
 
-7. You'll need to disable selinux and firewall. Run the following commands:
+7. You'll need to install CORTX Python Utilities. Follow the steps to install [CORTX Python Utilities](https://github.com/Seagate/cortx-utils/blob/main/py-utils/README.md).
+
+8. You'll need to install Kafka Server. Follow the steps to install [Kafka Server](https://github.com/Seagate/cortx-utils/wiki/Kafka-Server-Setup).
+
+9. You'll need to disable selinux and firewall. Run the following commands:
 
      `$ systemctl stop firewalld` 
 
@@ -57,7 +65,7 @@ This guide provides a step-by-step walkthrough for getting you CORTX-S3 Server-r
 
      `$ setenforce 0` - you'll get a `setenforce: SELinux is disabled` status.
 
-     `$ sed 's/SELINUX=enforcing/SELINUX=disabled/' /etc/sysconfig/selinux` - you'll get a `SELINUX=disabled` status.
+     `$ sed -i 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config` - you'll get a `SELINUX=disabled` status.
 
      Run `$ shutdown -r now` - to reboot your system.
      
@@ -156,16 +164,20 @@ The image below illustrates the output log of a system test that is successful.
 
 Before your test your build, ensure that you have installed and configured the following:
 
-1. Make sure you have installed `easy_install`
-    * To check if you have `easy_install`, run the command: `$ easy_install --version`
-    * To install `easy_install`, run the command: `$ yum install python-setuptools python-setuptools-devel`
-2. Ensure you've installed `pip`
-    * To check if you have pip installed, run the command: `$ pip --version`
-    * To install pip, run the command: `$ python --version`
-3. If you don't have Python Version 2.6.5+, then install Python using: `$ python3 --version`
-    *  If you don't have Python Version 3.3, then install python3 using: `$ easy_install pip`
+1. Make sure you have installed easy_install.
+    - To check if you have easy_install, run the command: `$ easy_install --version`
+    - To install easy_install, run the command: `$ yum install python-setuptools python-setuptools-devel`
+2. Ensure you've installed pip.
+    - To check if you have pip installed, run the command: `$ pip --version`
+    - To install pip, run the command: `$ easy_install pip`
+3. If you don't have Python Version 2.6.5+, install Python using: `$ yum install python26`
+    - If you don't have Python Version 3.3, then install python3 using: `$ yum install python3`
 4. Ensure that CORTX-S3 Server and its dependent services are running.
     1. To start CORTX-S3 Server and its dependent services, run the command: `$ ./jenkins-build.sh --skip_build --skip_tests`
+       
+       In case you get errors on haproxy service being inactive or not running, follow the steps below:
+        - To check if HAProxy is working run `systemctl status haproxy`
+        - If you see the status as inactive, use the command `systemctl start haproxy`
     2. To view the `PID` of the active S3 service, run the command: `$ pgrep s3`
     3. To view the `PID` of the active Motr service, run the command: `$ pgrep m0`
 5. Follow these steps to install the AWS client and plugin:
@@ -181,35 +193,53 @@ Before your test your build, ensure that you have installed and configured the f
               * Copy and save the Access and Secret Keys for the new user.
 
 6. To Configure AWS run the following commands:
+   
    Keep the Access and Secret Keys generated in Step 4.iv. of the [1.0 Prerequisites Section](#10-Prerequisites).
+   
    1.  Run `$ aws configure` and enter the following details:
         * `AWS Access Key ID [None]: <ACCESS KEY>`
         * `AWS Secret Access Key [None]: <SECRET KEY>`
         * `Default region name [None]: US`
         * `Default output format [None]: text`
-   2. Configure the AWS plugin Endpoint using:
-
-        ```shell
-
-        $ aws configure set plugins.endpoint awscli_plugin_endpoint
-        $ aws configure set s3.endpoint_url https://s3.seagate.com
-        $ aws configure set s3api.endpoint_url https://s3.seagate.com
-        ```
-   3. Run the following command to view the contents of your AWS config file: `$ cat ~/.aws/config`
-
-      The output is as shown below:
-
+   2. Configure the AWS Plugin Endpoint using:
+      `$ aws configure set plugins.endpoint awscli_plugin_endpoint`
+        - To configure AWS in SSL mode run:
+            `$ aws configure set s3.endpoint_url https://s3.seagate.com`
+            `$ aws configure set s3api.endpoint_url https://s3.seagate.com`
+        - To configure AWS in non-SSL mode, please run:
+            `$ aws configure set s3.endpoint_url http://s3.seagate.com`
+            `$ aws configure set s3api.endpoint_url http://s3.seagate.com`
+   3. Run the following command to view the contents of your AWS config file: 
+      `$ cat ~/.aws/config`
+      
+      1. For AWS in SSL mode, you'll need to configure the `[default]` section with the `ca_bundle=<path to ca.crt file>` parameter.
+      
+      **Sample Output for SSL mode**
+       
       ```shell
-
-      [default]
-      output = text
-      region = US
-      s3 =
-      endpoint_url = http://s3.seagate.com
-      s3api =
-      endpoint_url = http://s3.seagate.com
-      [plugins]
-      endpoint = awscli_plugin_endpoint
+      
+         [default]
+         output = text
+         region = US
+         s3 = endpoint_url = https://s3.seagate.com
+         s3api = endpoint_url = https://s3.seagate.com
+         ca_bundle = /etc/ssl/stx-s3-clients/s3/ca.crt
+         [plugins]
+         endpoint = awscli_plugin_endpoint
+      ```
+      2. For non-SSL mode you can leave the [default] section as is.
+      
+      **Sample Output for non-SSL mode**
+      
+      ```shell
+      
+        [default]
+        output = text
+        region = US
+        s3 = endpoint_url = http://s3.seagate.com
+        s3api = endpoint_url = http://s3.seagate.com
+        [plugins]
+        endpoint = awscli_plugin_endpoint
       ```
 
     4. Ensure that your AWS credential file contains your Access Key Id and Secret Key by using: `$ cat ~/.aws/credentials`
@@ -324,3 +354,5 @@ Refer to our [CORTX Contribution Guide](https://github.com/Seagate/cortx/blob/ma
 ### Reach Out to Us
 
 Please refer to the [Support](../SUPPORT.md) section to reach out to us with your questions, contributions, and feedback.
+
+**CORTX S3 Server submodule was last tested by @saumyasunder on 3/11/2020 on VMware Workstation 16 Pro.**

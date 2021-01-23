@@ -126,7 +126,7 @@ class S3Option {
   int log_file_max_size_mb;
   bool s3_enable_auth_ssl;
   bool s3server_ssl_enabled;
-  bool s3server_objectleak_tracking_enabled;
+  bool s3server_obj_delayed_del_enabled;
   bool s3_reuseport;
   bool motr_http_reuseport;
   bool log_buffering_enable;
@@ -169,6 +169,9 @@ class S3Option {
   std::string redis_srv_addr;
   unsigned short redis_srv_port;
 
+  unsigned motr_etimedout_max_threshold;
+  unsigned motr_etimedout_window_sec;
+
   std::string s3_daemon_dir;
   unsigned short s3_daemon_redirect;
 
@@ -202,7 +205,7 @@ class S3Option {
     s3_iam_cert_file = "/etc/ssl/stx-s3/s3auth/s3authserver.crt";
     s3server_ssl_session_timeout_in_sec = DAY_IN_SECONDS;
     s3server_ssl_enabled = false;
-    s3server_objectleak_tracking_enabled = false;
+    s3server_obj_delayed_del_enabled = true;
 
     s3_grace_period_sec = 10;  // 10 seconds
     is_s3_shutting_down = false;
@@ -285,6 +288,9 @@ class S3Option {
     redis_srv_addr = "127.0.0.1";
     redis_srv_port = 6397;
 
+    motr_etimedout_max_threshold = 5;
+    motr_etimedout_window_sec = 60;
+
     eventbase = NULL;
 
     // find out the nodename
@@ -309,6 +315,7 @@ class S3Option {
  public:
   bool load_section(std::string section_name, bool force_override_from_config);
   bool load_all_sections(bool force_override_from_config);
+  bool reload_modifiable_options();
 
   std::string get_s3_nodename();
   std::string get_ipv4_bind_addr();
@@ -361,8 +368,11 @@ class S3Option {
   int get_log_file_max_size_in_mb();
   bool is_s3_ssl_auth_enabled();
   bool is_s3server_ssl_enabled();
-  bool is_s3server_objectleak_tracking_enabled();
-  void set_s3server_objectleak_tracking_enabled(const bool& flag);
+  bool is_s3server_addb_dump_enabled();
+
+  bool is_s3server_obj_delayed_del_enabled();
+  void set_s3server_obj_delayed_del_enabled(const bool& flag);
+
   bool is_s3_reuseport_enabled();
   bool is_motr_http_reuseport_enabled();
   const char* get_iam_cert_file();
@@ -431,6 +441,9 @@ class S3Option {
 
   std::string get_redis_srv_addr();
   unsigned short get_redis_srv_port();
+
+  unsigned get_motr_etimedout_max_threshold();
+  unsigned get_motr_etimedout_window_sec();
 
   bool get_motr_read_mempool_zeroed_buffer();
   bool get_libevent_mempool_zeroed_buffer();

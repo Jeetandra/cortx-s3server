@@ -33,19 +33,57 @@ os_full_version=""
 os_major_version=""
 os_minor_version=""
 os_build_num=""
+ansible_automation=0
 
 
 unsupported_os() {
-  echo "S3 currently supports only CentOS 7.7.1908 or RHEL 7.7" 1>&2;
+  echo "S3 currently supports only CentOS 7.7.1908, CentOS 7.8.2003 or RHEL 7.7" 1>&2;
   exit 1;
 }
 
 check_supported_kernel() {
-  kernel_version=`uname -r`
-  if [[ "$kernel_version" != 3.10.0-1062.* ]]; then
-        echo "S3 supports kernel 3.10.0-1062.el7.x86_64" 1>&2;
-        exit 1
-  fi }
+  kernel_version=$(uname -r)
+  if [[ "$kernel_version" != 3.10.0-1062.* && "$kernel_version" != 3.10.0-1127.* ]]
+  then
+    echo "S3 supports kernel version: [3.10.0-1062.el7.x86_64] or [3.10.0-1127.el7.x86_64] only." 1>&2;
+    exit 1
+  fi
+}
+
+#function to install/upgrade cortx-py-utils rpm
+install_cortx_py_utils() {
+  #rpm -q cortx-py-utils && yum remove cortx-py-utils -y && yum install cortx-py-utils -y
+  if rpm -q cortx-py-utils ; then
+    yum upgrade cortx-py-utils -y
+  else
+    yum install cortx-py-utils -y
+  fi
+}
+
+# function to install all prerequisite for dev vm 
+install_pre_requisites() {
+
+  # install kafka server
+  sh ${S3_SRC_DIR}/scripts/kafka/install-kafka.sh -c 1 -i $HOSTNAME
+  
+  #create topic
+  sh ${S3_SRC_DIR}/scripts/kafka/create-topic.sh -c 1 -i $HOSTNAME
+  
+  # install or upgrade cortx-py-utils
+  install_cortx_py_utils
+  
+  # install cryptography
+  pip3 install cryptography
+  
+  #install toml
+  pip3 install toml
+  
+  #install confluent_kafka
+  pip3 install confluent_kafka
+  
+  #install python-ldap
+  pip3 install python-ldap
+}
 
 usage() {
   echo "Usage: $0
@@ -54,45 +92,45 @@ usage() {
        -h    show this help message and exit" 1>&2;
   exit 1; }
 
+# OS and Kernel version checks
 if [ ! -z "$centos_release" ]; then
   os_full_version=`cat /etc/redhat-release | awk  '{ print $4 }'`
   os_major_version=`echo $os_full_version | awk -F '.' '{ print $1 }'`
   os_minor_version=`echo $os_full_version | awk -F '.' '{ print $2 }'`
   os_build_num=`echo $os_full_version | awk -F '.' '{ print $3 }'`
-elif [ ! -z "$redhat_release" ]; then
-  os_full_version=`cat /etc/redhat-release | awk  '{ print $7 }'`
-  os_major_version=`echo $os_full_version | awk -F '.' '{ print $1 }'`
-  os_minor_version=`echo $os_full_version | awk -F '.' '{ print $2 }'`
-fi
 
-# OS version and Kernel Checks
-if [ "$os_major_version" = "7" ]; then
-  if [ "$os_minor_version" = "7" ]; then
-    # Centos 7.7
-    if [ ! -z "$centos_release" ]; then
-      if [ "$os_build_num" != "1908" ]; then
-        echo "CentOS build $os_build_num is currently not supported"
-        exit 1
-      fi
-      check_supported_kernel
-    # RHEL 7.7
-    elif [ ! -z "$redhat_release" ]; then
-      check_supported_kernel
-    # Other OS 7.7
-    else
+  if [ "$os_major_version" = "7" ]; then
+    if [[ "$os_minor_version" != "7" && "$os_minor_version" != "8" ]]; then
       unsupported_os
+    elif [[ "$os_build_num" != "1908" && "$os_build_num" != "2003" ]]; then
+      echo "CentOS build $os_build_num is currently not supported."
+      exit 1
+    else
+      check_supported_kernel
     fi
   else
     unsupported_os
   fi
+elif [ ! -z "$redhat_release" ]; then
+  os_full_version=`cat /etc/redhat-release | awk  '{ print $7 }'`
+  os_major_version=`echo $os_full_version | awk -F '.' '{ print $1 }'`
+  os_minor_version=`echo $os_full_version | awk -F '.' '{ print $2 }'`
+
+  if [[ "$os_major_version" = "7" && "$os_minor_version" = "7" ]]; then
+    check_supported_kernel
+  else
+    unsupported_os
+  fi
 else
- unsupported_os
+  unsupported_os
 fi
 
 if [[ $# -eq 0 ]] ; then
   source ${S3_SRC_DIR}/scripts/env/common/setup-yum-repos.sh
+  #install pre-requisites on dev vm
+  install_pre_requisites
 else
-  while getopts "ah" x; do
+  while getopts "ahs" x; do
       case "${x}" in
           a)
               yum install createrepo -y
@@ -100,6 +138,12 @@ else
               read -p "Git Access Token:" git_access_token
               source ${S3_SRC_DIR}/scripts/env/common/create-cortx-repo.sh -G $git_access_token
               ;;
+          s)
+             source ${S3_SRC_DIR}/scripts/env/common/setup-yum-repos.sh
+             #install pre-requisites on dev vm
+             install_pre_requisites
+             ansible_automation=1;
+             ;;
           *)
               usage
               ;;
@@ -126,6 +170,9 @@ rpm -q gmock && rpm -e gmock
 
 rpm -q gtest-devel && rpm -e gtest-devel
 rpm -q gtest && rpm -e gtest
+
+# Erase old haproxy rpm and later install latest haproxy version 1.8.14
+rpm -q haproxy && rpm -e haproxy
 
 cd $BASEDIR
 
@@ -161,9 +208,6 @@ mkdir -p /etc/ssl
 
 cp -R  ${BASEDIR}/../../../ansible/files/certs/* /etc/ssl/
 
-# Generate random password for jks key and keystore passwords
-sh ${S3_SRC_DIR}/scripts/create_auth_jks_password.sh
-
 # Configure dev env
 yum install -y ansible facter
 
@@ -186,7 +230,14 @@ cp -f ./hosts ./hosts_local
 sed -i "s/^xx.xx.xx.xx/127.0.0.1/" ./hosts_local
 
 # Setup dev env
-ansible-playbook -i ./hosts_local --connection local setup_s3dev_centos77_8.yml -v  -k --extra-vars "s3_src=${S3_SRC_DIR}"
+if [ $ansible_automation -eq 1 ]
+then
+   OPENLDAP_PASSWD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 6 | head -n 1)
+   LDAPADMIN_PASSWD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 7 | head -n 1)
+   ansible-playbook -i ./hosts_local --connection local setup_s3dev_centos77_8.yml -v --extra-vars "s3_src=${S3_SRC_DIR} openldappasswd=$OPENLDAP_PASSWD ldapiamadminpasswd=$LDAPADMIN_PASSWD"
+else
+   ansible-playbook -i ./hosts_local --connection local setup_s3dev_centos77_8.yml -v -k --extra-vars "s3_src=${S3_SRC_DIR}"
+fi
 
 rm -f ./hosts_local
 

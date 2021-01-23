@@ -26,6 +26,9 @@
 #include "s3_motr_kvs_reader.h"
 #include "s3_motr_kvs_writer.h"
 #include "s3_fake_motr_kvs.h"
+#include "s3_common_utilities.h"
+
+#include <ctime>
 
 /*
  *  <IEM_INLINE_DOCUMENTATION>
@@ -51,14 +54,27 @@
  *  </IEM_INLINE_DOCUMENTATION>
  */
 
+// To prevent motr failure in case of rapid ETIMEDOUT errors
+// s3server should stop itself
+// number of errors should not be more than
+// S3_SERVER_MOTR_ETIMEDOUT_MAX_THRESHOLD in S3_SERVER_MOTR_ETIMEDOUT_WINDOW_SEC
+// seconds
+// Note: these vars are not static because they used as extern in UTs
+int64_t gs_timeout_window_start = time(NULL);
+unsigned gs_timeout_cnt = 0;
+bool gs_timeout_shutdown_in_progress = false;
+void (*gs_motr_timeout_shutdown)(int ignore) = s3_kickoff_graceful_shutdown;
+
 // This is run on main thread.
 void motr_op_done_on_main_thread(evutil_socket_t, short events,
                                  void *user_data) {
   std::string request_id;
+  std::string stripped_request_id;
+
   if (user_data == NULL) {
-    s3_log(S3_LOG_DEBUG, "", "Entering\n");
+    s3_log(S3_LOG_DEBUG, "", "%s Entry\n", __func__);
     s3_log(S3_LOG_ERROR, "", "Input argument user_data is NULL\n");
-    s3_log(S3_LOG_DEBUG, "", "Exiting\n");
+    s3_log(S3_LOG_DEBUG, "", "%s Exit", __func__);
     return;
   }
   struct user_event_context *user_context =
@@ -67,10 +83,11 @@ void motr_op_done_on_main_thread(evutil_socket_t, short events,
   if (context == NULL) {
     s3_log(S3_LOG_ERROR, "", "context pointer is NULL\n");
   }
-  if (context->get_request() != NULL) {
+  if (context->get_request()) {
     request_id = context->get_request()->get_request_id();
+    stripped_request_id = context->get_request()->get_stripped_request_id();
   }
-  s3_log(S3_LOG_DEBUG, request_id, "Entering\n");
+  s3_log(S3_LOG_DEBUG, request_id, "%s Entry\n", __func__);
   struct event *s3user_event = (struct event *)user_context->user_event;
   if (s3user_event == NULL) {
     s3_log(S3_LOG_ERROR, request_id, "User event is NULL\n");
@@ -89,24 +106,60 @@ void motr_op_done_on_main_thread(evutil_socket_t, short events,
              S3_IEM_MOTR_CONN_FAIL_JSON);
     }
     context->on_failed_handler()();  // Invoke the handler.
+
+    // Count ETIMEDOUT errors for any motr operations
+    // if number of errors for the etimedout_window sec
+    // greater than etimedout_max_threshold s3server should be
+    // restarted
+    if (error_code == -ETIMEDOUT && !gs_timeout_shutdown_in_progress) {
+
+      S3Option *optinst = S3Option::get_instance();
+      unsigned err_thr = optinst->get_motr_etimedout_max_threshold();
+      unsigned err_wnd = optinst->get_motr_etimedout_window_sec();
+      int64_t curtime = time(NULL);
+
+      if (curtime - gs_timeout_window_start >= (int64_t)err_wnd) {
+        s3_log(S3_LOG_DEBUG, request_id,
+               "Reset motr ETIMEDOUT window; cur window sec %" PRId64 ";",
+               curtime - gs_timeout_window_start);
+        gs_timeout_cnt = 0;
+      }
+      gs_timeout_cnt++;
+      gs_timeout_window_start = curtime;
+      if (gs_timeout_cnt >= err_thr) {
+        s3_log(
+            S3_LOG_ERROR, request_id,
+            "Shutdown. Motr ETIMEDOUT error cnt %u reached threshold value %u "
+            "for %" PRId64 " sec with allowed window %u sec",
+            gs_timeout_cnt, err_thr, curtime - gs_timeout_window_start,
+            err_wnd);
+        if (gs_motr_timeout_shutdown) {
+          gs_motr_timeout_shutdown(0);
+        }
+        gs_timeout_shutdown_in_progress = true;
+      }
+    }
   }
+
   free(user_data);
   // Free user event
   if (s3user_event) event_free(s3user_event);
-  s3_log(S3_LOG_DEBUG, request_id, "Exiting\n");
+  s3_log(S3_LOG_DEBUG, request_id, "%s Exit", __func__);
 }
 
 // Motr callbacks, run in motr thread
 void s3_motr_op_stable(struct m0_op *op) {
-  s3_log(S3_LOG_DEBUG, "", "Entering\n");
+  s3_log(S3_LOG_DEBUG, "", "%s Entry\n", __func__);
   struct s3_motr_context_obj *ctx = (struct s3_motr_context_obj *)op->op_datum;
 
   S3AsyncOpContextBase *app_ctx =
       (S3AsyncOpContextBase *)ctx->application_context;
   int motr_rc = app_ctx->get_motr_api()->motr_op_rc(op);
   std::string request_id = app_ctx->get_request()->get_request_id();
-  s3_log(S3_LOG_DEBUG, request_id, "Entering\n");
-  s3_log(S3_LOG_DEBUG, request_id, "Return code = %d op_code = %d\n", motr_rc,
+  std::string stripped_request_id =
+      app_ctx->get_request()->get_stripped_request_id();
+  s3_log(S3_LOG_DEBUG, request_id, "%s Entry\n", __func__);
+  s3_log(S3_LOG_DEBUG, request_id, "Return code = %d op_code = %u\n", motr_rc,
          op->op_code);
 
   s3_log(S3_LOG_DEBUG, request_id, "op_index_in_launch = %d\n",
@@ -118,6 +171,8 @@ void s3_motr_op_stable(struct m0_op *op) {
     app_ctx->set_op_status_for(ctx->op_index_in_launch,
                                S3AsyncOpStatus::success, "Success.");
   } else {
+    s3_log(S3_LOG_ERROR, request_id, "Error code = %d op_code = %u\n", motr_rc,
+           op->op_code);
     app_ctx->set_op_status_for(ctx->op_index_in_launch, S3AsyncOpStatus::failed,
                                "Operation Failed.");
   }
@@ -136,7 +191,7 @@ void s3_motr_op_stable(struct m0_op *op) {
     S3PostToMainLoop((void *)user_ctx)(motr_op_done_on_main_thread, request_id);
 #endif  // S3_GOOGLE_TEST
   }
-  s3_log(S3_LOG_DEBUG, request_id, "Exiting\n");
+  s3_log(S3_LOG_DEBUG, request_id, "%s Exit", __func__);
 }
 
 void s3_motr_op_failed(struct m0_op *op) {
@@ -145,9 +200,12 @@ void s3_motr_op_failed(struct m0_op *op) {
   S3AsyncOpContextBase *app_ctx =
       (S3AsyncOpContextBase *)ctx->application_context;
   std::string request_id = app_ctx->get_request()->get_request_id();
-  s3_log(S3_LOG_DEBUG, request_id, "Entering\n");
+  std::string stripped_request_id =
+      app_ctx->get_request()->get_stripped_request_id();
+  s3_log(S3_LOG_DEBUG, request_id, "%s Entry\n", __func__);
   int motr_rc = app_ctx->get_motr_api()->motr_op_rc(op);
-  s3_log(S3_LOG_ERROR, request_id, "Error code = %d\n", motr_rc);
+  s3_log(S3_LOG_ERROR, request_id, "Error code = %d op_code = %u\n", motr_rc,
+         op->op_code);
 
   s3_log(S3_LOG_DEBUG, request_id, "op_index_in_launch = %d\n",
          ctx->op_index_in_launch);
@@ -174,13 +232,15 @@ void s3_motr_op_failed(struct m0_op *op) {
     S3PostToMainLoop((void *)user_ctx)(motr_op_done_on_main_thread, request_id);
 #endif  // S3_GOOGLE_TEST
   }
-  s3_log(S3_LOG_DEBUG, request_id, "Exiting\n");
+  s3_log(S3_LOG_DEBUG, request_id, "%s Exit", __func__);
 }
 
 void s3_motr_op_pre_launch_failure(void *application_context, int rc) {
   S3AsyncOpContextBase *app_ctx = (S3AsyncOpContextBase *)application_context;
   std::string request_id = app_ctx->get_request()->get_request_id();
-  s3_log(S3_LOG_DEBUG, request_id, "Entering\n");
+  std::string stripped_request_id =
+      app_ctx->get_request()->get_stripped_request_id();
+  s3_log(S3_LOG_DEBUG, request_id, "%s Entry\n", __func__);
   s3_log(S3_LOG_DEBUG, request_id, "Error code = %d\n", rc);
   app_ctx->set_op_errno_for(0, rc);
   app_ctx->set_op_status_for(0, S3AsyncOpStatus::failed, "Operation Failed.");
@@ -194,11 +254,11 @@ void s3_motr_op_pre_launch_failure(void *application_context, int rc) {
 #else
   S3PostToMainLoop((void *)user_ctx)(motr_op_done_on_main_thread, request_id);
 #endif  // S3_GOOGLE_TEST
-  s3_log(S3_LOG_DEBUG, request_id, "Exiting\n");
+  s3_log(S3_LOG_DEBUG, request_id, "%s Exit", __func__);
 }
 
 void s3_motr_dummy_op_stable(evutil_socket_t, short events, void *user_data) {
-  s3_log(S3_LOG_DEBUG, "", "Entering\n");
+  s3_log(S3_LOG_DEBUG, "", "%s Entry\n", __func__);
   struct user_event_context *user_context =
       (struct user_event_context *)user_data;
   struct m0_op *op = (struct m0_op *)user_context->app_ctx;
@@ -251,7 +311,7 @@ void s3_motr_dummy_op_stable(evutil_socket_t, short events, void *user_data) {
 }
 
 void s3_motr_dummy_op_failed(evutil_socket_t, short events, void *user_data) {
-  s3_log(S3_LOG_DEBUG, "", "Entering\n");
+  s3_log(S3_LOG_DEBUG, "", "%s Entry\n", __func__);
   struct user_event_context *user_context =
       (struct user_event_context *)user_data;
   struct m0_op *op = (struct m0_op *)user_context->app_ctx;

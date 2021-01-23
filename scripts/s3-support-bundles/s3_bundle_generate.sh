@@ -43,6 +43,7 @@ bundle_name="s3_$bundle_id.tar.xz"
 s3_bundle_location=$bundle_path/s3
 
 haproxy_config="/etc/haproxy/haproxy.cfg"
+# Collecting rotated logs for haproxy and ldap along with live log
 haproxy_log="/var/log/haproxy.log"
 ldap_log="/var/log/slapd.log"
 
@@ -51,7 +52,7 @@ authserver_config="/opt/seagate/cortx/auth/resources/authserver.properties"
 backgrounddelete_config="/opt/seagate/cortx/s3/s3backgrounddelete/config.yaml"
 s3startsystem_script="/opt/seagate/cortx/s3/s3startsystem.sh"
 s3server_binary="/opt/seagate/cortx/s3/bin/s3server"
-s3_motr_dir="/var/motr/s3server-*"
+s3_motr_dir="/var/log/seagate/motr/s3server-*"
 s3_core_dir="/var/log/crash"
 sys_auditlog_dir="/var/log/audit"
 
@@ -170,15 +171,15 @@ collect_core_files(){
   cd $cwd
 }
 
-# Collect <m0trace_files_count> m0trace files from each s3 instance present in /var/motr/s3server-* directory if available
+# Collect <m0trace_files_count> m0trace files from each s3 instance present in /var/log/seagate/motr/s3server-* directory if available
 # Files will be available at /tmp/s3_support_bundle_<pid>/s3_m0trace_files/<s3instance-name>
 collect_m0trace_files(){
   echo "Collecting m0trace files dump..."
   m0trace_filename_pattern="m0trace.*"
-  dir="/var/motr"
+  dir="/var/log/seagate/motr"
   tmpr_dir="$tmp_dir/m0trraces_tmp"
   cwd=$(pwd)
-  # if /var/motr missing then return
+  # if /var/log/seagate/motr missing then return
   if [ ! -d "$dir" ];
   then
       return;
@@ -223,7 +224,7 @@ collect_m0trace_files(){
 
 collect_first_m0trace_file(){
   echo "Collecting oldest m0trace file dump..."
-  dir="/var/motr"
+  dir="/var/log/seagate/motr"
   cwd=$(pwd)
   m0trace_filename_pattern="*/m0trace.*"
   if [ ! -d "$dir" ];
@@ -271,7 +272,7 @@ then
    args=$args" "$first_s3_m0trace_file
 fi
 
-# collect latest 5 m0trace files from /var/motr/s3server-* directory
+# collect latest 5 m0trace files from /var/log/seagate/motr/s3server-* directory
 # S3server name is generated with random name e.g s3server-0x7200000000000001:0x22
 # check if s3server name with compgen globpat is available
 if compgen -G $s3_motr_dir > /dev/null;
@@ -283,10 +284,10 @@ then
     fi
 fi
 
-# Collect ldap logs if available
+# Collect ldap logs along with rotated logs if available
 if [ -f "$ldap_log" ];
 then
-    args=$args" "$ldap_log
+    args=$args" "$ldap_log*
 fi
 
 # Collect System Audit logs if available
@@ -349,10 +350,10 @@ then
     args=$args" "$haproxy_config
 fi
 
-# Collect haproxy log file if available
+# Collect haproxy log along with rotated logs if available
 if [ -f "$haproxy_log" ];
 then
-    args=$args" "$haproxy_log
+    args=$args" "$haproxy_log*
 fi
 
 # Create temporary directory for creating other files as below
@@ -404,47 +405,38 @@ fi
 
 ## Collect LDAP data
 mkdir -p $ldap_dir
-# Fetch ldap root DN password from provisioning else use default
-rootdnpasswd=""
-if rpm -q "salt"  > /dev/null;
+# Get password from cortx-utils
+# ldapadmin and rootdn passwords are same, so reading ldapadmin password
+rootdnpasswd=$(s3cipher --use_base64 --key_len  12  --const_key  openldap 2>/dev/null)
+if [[ $? != 0 || -z "$rootdnpasswd" ]]
 then
-    # Prod/Release environment
-    rootdnpasswd=$(salt-call pillar.get openldap:admin:secret --output=newline_values_only) 2>/dev/null
-    rootdnpasswd=$(salt-call lyveutil.decrypt openldap "${rootdnpasswd}" --output=newline_values_only) 2>/dev/null
+    echo "Failed to decrypt ldap admin password, skipping collection of ldap data."
 else
-    # Dev environment
-    source /root/.s3_ldap_cred_cache.conf 2>/dev/null
-fi
+    # Run ldap commands
+    ldapsearch -b "cn=config" -x -w "$rootdnpasswd" -D "cn=admin,cn=config" -H ldapi:/// > "$ldap_config"  2>&1
+    ldapsearch -s base -b "cn=subschema" objectclasses -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" -H ldapi:/// > "$ldap_subschema"  2>&1
+    ldapsearch -b "ou=accounts,dc=s3,dc=seagate,dc=com" -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" "objectClass=Account" -H ldapi:/// -LLL ldapentrycount > "$ldap_accounts" 2>&1
+    ldapsearch -b "ou=accounts,dc=s3,dc=seagate,dc=com" -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" "objectClass=iamUser" -H ldapi:/// -LLL ldapentrycount > "$ldap_users"  2>&1
 
-if [[ -z "$rootdnpasswd" ]]
-then
-    rootdnpasswd=$ldap_root_pwd 2>/dev/null
-fi
+    if [ -f "$ldap_config" ];
+    then
+        args=$args" "$ldap_config
+    fi
 
-# Run ldap commands
-ldapsearch -b "cn=config" -x -w "$rootdnpasswd" -D "cn=admin,cn=config" -H ldapi:/// > "$ldap_config"  2>&1
-ldapsearch -s base -b "cn=subschema" objectclasses -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" -H ldapi:/// > "$ldap_subschema"  2>&1
-ldapsearch -b "ou=accounts,dc=s3,dc=seagate,dc=com" -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" "objectClass=Account" -H ldapi:/// -LLL ldapentrycount > "$ldap_accounts" 2>&1
-ldapsearch -b "ou=accounts,dc=s3,dc=seagate,dc=com" -x -w "$rootdnpasswd" -D "cn=admin,dc=seagate,dc=com" "objectClass=iamUser" -H ldapi:/// -LLL ldapentrycount > "$ldap_users"  2>&1
+    if [ -f "$ldap_subschema" ];
+    then
+        args=$args" "$ldap_subschema
+    fi
 
-if [ -f "$ldap_config" ];
-then
-    args=$args" "$ldap_config
-fi
+    if [ -f "$ldap_accounts" ];
+    then
+        args=$args" "$ldap_accounts
+    fi
 
-if [ -f "$ldap_subschema" ];
-then
-    args=$args" "$ldap_subschema
-fi
-
-if [ -f "$ldap_accounts" ];
-then
-    args=$args" "$ldap_accounts
-fi
-
-if [ -f "$ldap_users" ];
-then
-    args=$args" "$ldap_users
+    if [ -f "$ldap_users" ];
+    then
+        args=$args" "$ldap_users
+    fi
 fi
 
 # Clean up temp files

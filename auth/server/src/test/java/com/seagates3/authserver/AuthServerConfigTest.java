@@ -43,14 +43,14 @@ public class AuthServerConfigTest {
         Properties authServerConfig = getAuthProperties();
         AuthServerConfig.authResourceDir = "../resources";
         AuthServerConfig.init(authServerConfig);
-        assertEquals("s3.seagate.com", AuthServerConfig.getDefaultEndpoint());
+        assertEquals("127.0.0.1", AuthServerConfig.getDefaultEndpoint());
 
         assertEquals("resources/static/saml-metadata.xml",
                 AuthServerConfig.getSAMLMetadataFilePath());
 
-        assertEquals(9085, AuthServerConfig.getHttpPort());
+        assertEquals(28050, AuthServerConfig.getHttpPort());
 
-        assertEquals(9086, AuthServerConfig.getHttpsPort());
+        assertEquals(28051, AuthServerConfig.getHttpsPort());
 
         assertEquals("s3authserver.jks_template",
                      AuthServerConfig.getKeyStoreName());
@@ -118,16 +118,18 @@ public class AuthServerConfigTest {
 
     @Test
     public void readConfigTest() throws Exception {
-        AuthServerConfig.readConfig("../resources");
+      AuthServerConfig.readConfig("../resources",
+                                  "authserver.properties.sample",
+                                  "keystore.properties.sample");
 
-        assertEquals("s3.seagate.com", AuthServerConfig.getDefaultEndpoint());
+        assertEquals("127.0.0.1", AuthServerConfig.getDefaultEndpoint());
 
         assertEquals("resources/static/saml-metadata.xml",
                 AuthServerConfig.getSAMLMetadataFilePath());
 
-        assertEquals(9085, AuthServerConfig.getHttpPort());
+        assertEquals(28050, AuthServerConfig.getHttpPort());
 
-        assertEquals(9086, AuthServerConfig.getHttpsPort());
+        assertEquals(28051, AuthServerConfig.getHttpsPort());
 
         assertEquals("s3authserver.jks", AuthServerConfig.getKeyStoreName());
 
@@ -151,7 +153,9 @@ public class AuthServerConfigTest {
     @Test(expected = IOException.class)
     public void readConfigTest_ShouldThrowIOException() throws Exception {
         //Pass Invalid Path
-        AuthServerConfig.readConfig("/invalid/path");
+      AuthServerConfig.readConfig("/invalid/path",
+                                  "authserver.properties.sample",
+                                  "keystore.properties.sample");
     }
 
     private Properties getAuthProperties() throws Exception {
@@ -159,13 +163,13 @@ public class AuthServerConfigTest {
 
         authServerConfig.setProperty("s3Endpoints", "s3-us-west-2.seagate.com," +
                 "s3-us.seagate.com,s3-europe.seagate.com,s3-asia.seagate.com");
-        authServerConfig.setProperty("defaultEndpoint", "s3.seagate.com");
+        authServerConfig.setProperty("defaultEndpoint", "127.0.0.1");
         authServerConfig.setProperty("samlMetadataFileName", "saml-metadata.xml");
         authServerConfig.setProperty("nettyBossGroupThreads","1");
         authServerConfig.setProperty("nettyWorkerGroupThreads", "2");
         authServerConfig.setProperty("nettyEventExecutorThreads", "4");
-        authServerConfig.setProperty("httpPort", "9085");
-        authServerConfig.setProperty("httpsPort", "9086");
+        authServerConfig.setProperty("httpPort", "28050");
+        authServerConfig.setProperty("httpsPort", "28051");
         authServerConfig.setProperty("logFilePath", "/var/log/seagate/auth/");
         authServerConfig.setProperty("dataSource", "ldap");
         authServerConfig.setProperty("ldapHost", "127.0.0.1");
@@ -190,7 +194,10 @@ public class AuthServerConfigTest {
         authServerConfig.setProperty("s3KeyPassword", "seagate");
         authServerConfig.setProperty("s3AuthCertAlias", "s3auth_pass");
         authServerConfig.setProperty("enableHttpsToS3", "true");
+        authServerConfig.setProperty("s3CipherUtil",
+                                     "cortxsec getkey 123 ldap");
 
         return authServerConfig;
     }
 }
+

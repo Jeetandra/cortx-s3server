@@ -51,15 +51,8 @@ set -e
 SCRIPT_PATH=$(readlink -f "$0")
 BASEDIR=$(dirname "$SCRIPT_PATH")
 
-if rpm -q "salt"  > /dev/null 2>&1;
-then
-    # Release/Prod environment
-    ldap_admin_pwd=$(salt-call pillar.get openldap:iam_admin:secret --output=newline_values_only)
-    ldap_admin_pwd=$(salt-call lyveutil.decrypt openldap "${ldap_admin_pwd}" --output=newline_values_only)
-else
-    # Dev environment. Read ldap admin password from "/root/.s3_ldap_cred_cache.conf"
-    source /root/.s3_ldap_cred_cache.conf
-fi
+# TODO: to be removed, as we will remove all encryption and decryption of ldap passwords from s3authserver.
+ldap_admin_pwd=$(s3cipher --use_base64 --key_len  12  --const_key  openldap 2>/dev/null)
 
 USE_SUDO=
 if [[ $EUID -ne 0 ]]; then
@@ -172,7 +165,7 @@ up_cluster() {
     $USE_SUDO systemctl start haproxy
     $USE_SUDO systemctl start slapd
     $USE_SUDO systemctl start s3authserver
-    $USE_SUDO rm -fR /var/motr/*
+    $USE_SUDO rm -fR /var/log/seagate/motr/*
     $USE_SUDO m0setup -P 1 -N 1 -K 0 -vH
     $USE_SUDO sed -i 's/- name: m0t1fs/- name: s3server/' /etc/hare/hare_facts.yaml
     $USE_SUDO awk 'BEGIN {in_section=0} {if ($0 ~ /^- name:/) {in_section=0; if ($0 ~ /^- name: "s3server"/) {in_section=1;} } {if (in_section==1) {gsub("multiplicity: 4", "multiplicity: 2");} print;} }' /etc/hare/motr_role_mappings > /tmp/motr_role_mappings

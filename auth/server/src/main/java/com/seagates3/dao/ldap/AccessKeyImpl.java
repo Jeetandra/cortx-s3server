@@ -24,7 +24,7 @@ import java.util.ArrayList;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
+import java.util.Date;
 import com.novell.ldap.LDAPAttribute;
 import com.novell.ldap.LDAPAttributeSet;
 import com.novell.ldap.LDAPConnection;
@@ -84,7 +84,7 @@ public class AccessKeyImpl implements AccessKeyDAO {
             ldapResults = lc.search(accessKeyBaseDN, LDAPConnection.SCOPE_SUB,
                                     filter, attrs, false);
           }
-          if (ldapResults.hasMore()) {
+          if (ldapResults != null && ldapResults.hasMore()) {
             LDAPEntry entry;
             try {
               entry = ldapResults.next();
@@ -158,7 +158,7 @@ public class AccessKeyImpl implements AccessKeyDAO {
             throw new DataAccessException("Access key find failed.\n" + ex);
         }
 
-        if (ldapResultsForToken.hasMore()) {
+        if (ldapResultsForToken != null && ldapResultsForToken.hasMore()) {
           LDAPEntry ldapEntry;
             try {
               ldapEntry = ldapResultsForToken.next();
@@ -266,6 +266,7 @@ public class AccessKeyImpl implements AccessKeyDAO {
              * TODO - Replace this iteration with existing getCount method if
              * available.
              */
+            if (ldapResults != null) {
             while (ldapResults.hasMore()) {
               LDAPEntry entry = ldapResults.next();
               boolean temporary_credentials = true;
@@ -286,7 +287,7 @@ public class AccessKeyImpl implements AccessKeyDAO {
                 count++;
               }
             }
-
+            }
         } catch (LDAPException ex) {
             LOGGER.error("Failed to get the count of user access keys"
                     + " for user id :" + userId);
@@ -459,7 +460,11 @@ public class AccessKeyImpl implements AccessKeyDAO {
 
       AccessKeyStatus accessKeystatus;
       LDAPEntry entry;
-      while (ldapResults.hasMore()) {
+      int count = 0;
+      if (ldapResults != null) {
+        // TODO checking default search count = 500 to avoid failure. Make this
+        // configurable
+        while (ldapResults.hasMore() && count < 500) {
         accessKey = new AccessKey();
         try {
           entry = ldapResults.next();
@@ -484,10 +489,67 @@ public class AccessKeyImpl implements AccessKeyDAO {
 
           accessKeys.add(accessKey);
         }
+        count++;
       }
-
+      }
       AccessKey[] accessKeyList = new AccessKey[accessKeys.size()];
       return (AccessKey[])accessKeys.toArray(accessKeyList);
+    }
+    /**
+     * Below will delete expired access keys from ldap
+     */
+    @Override public void deleteExpiredKeys(User user)
+        throws DataAccessException {
+
+      String[] attrs = {LDAPUtils.ACCESS_KEY_ID, LDAPUtils.EXPIRY};
+
+      String accessKeyBaseDN =
+          String.format("%s=accesskeys,%s", LDAPUtils.ORGANIZATIONAL_UNIT_NAME,
+                        LDAPUtils.BASE_DN);
+
+      String filter = String.format("(&(%s=%s)(%s=%s))", LDAPUtils.USER_ID,
+                                    user.getId(), LDAPUtils.OBJECT_CLASS,
+                                    LDAPUtils.ACCESS_KEY_OBJECT_CLASS);
+
+      LDAPSearchResults ldapResults;
+      try {
+        ldapResults = LDAPUtils.search(accessKeyBaseDN,
+                                       LDAPConnection.SCOPE_SUB, filter, attrs);
+      }
+      catch (LDAPException ex) {
+        LOGGER.error("Failed to search access keys.");
+        throw new DataAccessException("Failed to search access keys" + ex);
+      }
+      AccessKey accessKey = new AccessKey();
+      LDAPEntry entry;
+      int count = 0;
+      if (ldapResults != null) {
+        // TODO checking default search count = 500 to avoid failure. Make this
+        // configurable
+        while (ldapResults.hasMore() && count < 500) {
+          try {
+            entry = ldapResults.next();
+          }
+          catch (LDAPException ex) {
+            LOGGER.error("Access key find failed.");
+            throw new DataAccessException("Access key find failed.\n" + ex);
+          }
+          String accessKeyId =
+              entry.getAttribute(LDAPUtils.ACCESS_KEY_ID).getStringValue();
+          accessKey.setId(accessKeyId);
+          if (entry.getAttribute(LDAPUtils.EXPIRY) != null) {
+            String serverDateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
+            Date expiryDate = DateUtil.toDate(
+                entry.getAttribute(LDAPUtils.EXPIRY).getStringValue());
+            if (expiryDate.compareTo(new Date()) < 0) {
+              delete (accessKey);
+              LOGGER.debug("Deleted expired temp key for account - " +
+                           user.getAccountName());
+            }
+          }
+          count++;
+        }
+      }
     }
 }
 
